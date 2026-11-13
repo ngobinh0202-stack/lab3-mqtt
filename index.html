@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b111c">
+  <meta name="description" content="Dashboard giám sát gia tốc và mô phỏng thuật toán phát hiện té ngã của Ngô Bình.">
+  <title>FallDetection · Giám sát té ngã</title>
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="model.js"></script>
+  <script defer src="mqtt-wire.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="./" aria-label="Trang đầu FallDetection">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="21" height="21" viewBox="0 0 24 24" fill="none"><path d="M2 12h5l2.8-6 4.1 12 2.5-6H22" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <span>Fall<span class="brand-accent">Detection</span></span>
+      </a>
+      <div class="topbar-right">
+        <span class="owner">Ngô Bình</span>
+        <div class="segments sources" role="group" aria-label="Nguồn dữ liệu">
+          <button id="source-demo" type="button" aria-pressed="true">Mô phỏng</button>
+          <button id="source-live" type="button" aria-pressed="false">ESP32 / MQTT</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="shell content">
+    <section class="heading" aria-labelledby="page-title">
+      <div>
+        <h1 id="page-title">Giám sát té ngã</h1>
+        <p>Theo dõi gia tốc, góc nghiêng và trạng thái cảnh báo của thiết bị.</p>
+      </div>
+      <span id="connection-badge" class="badge neutral"><span class="dot"></span><span id="connection-label">Mô phỏng trình duyệt</span></span>
+    </section>
+
+    <section id="connection-panel" class="panel connection" aria-labelledby="connection-title" hidden>
+      <div>
+        <h2 id="connection-title">Kết nối thiết bị</h2>
+        <p>Sao chép Base topic từ Serial Monitor. Dashboard gửi lệnh và nhận dữ liệu qua WebSocket.</p>
+      </div>
+      <form id="connection-form" class="connection-form">
+        <label>Địa chỉ WebSocket<input type="url" id="broker-url" required value="wss://broker.emqx.io:8084/mqtt" spellcheck="false"></label>
+        <label>Base topic<input type="text" id="base-topic" required maxlength="100" placeholder="falldetection/ndd/…" spellcheck="false" autocomplete="off"></label>
+        <button class="button primary" id="connect-button" type="submit">Kết nối</button>
+      </form>
+      <p id="connection-status" class="notice" role="status">Đang chờ kết nối.</p>
+    </section>
+
+    <section class="metrics" aria-label="Số đo chuyển động">
+      <article class="metric panel">
+        <div class="metric-heading">
+          <h2>Gia tốc tổng</h2>
+          <span class="metric-icon teal" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M2 12h5l3-6 4 12 3-6h5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        </div>
+        <div class="metric-value"><strong id="accel-value">—</strong><span>g</span></div>
+        <p>Xấp xỉ 1 g khi đứng yên</p>
+      </article>
+      <article class="metric panel">
+        <div class="metric-heading">
+          <h2>Góc nghiêng</h2>
+          <span class="metric-icon violet" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4 19h16M4 19 15 5m-4 7a9 9 0 0 1 4 7" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></span>
+        </div>
+        <div class="metric-value"><strong id="tilt-value">—</strong><span>°</span></div>
+        <p>So với tư thế chuẩn</p>
+      </article>
+      <article class="metric panel">
+        <div class="metric-heading">
+          <h2>Tốc độ góc</h2>
+          <span class="metric-icon blue" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M19 10a7 7 0 1 0-1.8 6.8M19 5v5h-5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        </div>
+        <div class="metric-value"><strong id="gyro-value">—</strong><span>°/s</span></div>
+        <p>Ngưỡng ổn định dưới 25 °/s</p>
+      </article>
+      <article class="metric panel">
+        <div class="metric-heading">
+          <h2>Cảnh báo đã ghi</h2>
+          <span class="metric-icon amber" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M5 17h14l-2-3V9a5 5 0 0 0-10 0v5l-2 3Zm5 3h4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+        </div>
+        <div class="metric-value"><strong id="count-value">0</strong><span>lần</span></div>
+        <p id="counter-caption">Trong phiên mô phỏng</p>
+      </article>
+    </section>
+
+    <div class="workspace">
+      <section class="panel chart-panel" aria-labelledby="chart-title">
+        <div class="section-head chart-head">
+          <div>
+            <h2 id="chart-title">Chuyển động theo thời gian</h2>
+            <p>Mẫu gần nhất · <span id="chart-source">Mô phỏng</span></p>
+          </div>
+          <div class="segments chart-tabs" role="group" aria-label="Chỉ số trên biểu đồ">
+            <button id="chart-accel" type="button" aria-pressed="true">Gia tốc</button>
+            <button id="chart-tilt" type="button" aria-pressed="false">Góc nghiêng</button>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="motion-chart" role="img" aria-label="Biểu đồ gia tốc theo thời gian"></canvas>
+          <div id="chart-empty" class="chart-empty" hidden>Đang chờ số đo từ thiết bị</div>
+        </div>
+        <div class="chart-footer">
+          <span class="legend"><span class="legend-line"></span><span id="legend-label">Gia tốc tổng</span></span>
+          <span class="legend"><span class="legend-dashed"></span><span id="threshold-label">Ngưỡng va đập 2,5 g</span></span>
+          <span class="chart-duration">16 giây gần nhất</span>
+        </div>
+      </section>
+
+      <aside class="side" aria-label="Trạng thái và điều khiển">
+        <section id="device-state" class="panel state-panel healthy" aria-labelledby="status-title">
+          <div class="state-head">
+            <span class="state-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3 5 6v5c0 4.8 3.2 7.8 7 10 3.8-2.2 7-5.2 7-10V6l-7-3Zm-3 9 2 2 4-4" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+            <div>
+              <p class="eyebrow">Trạng thái phát hiện</p>
+              <h2 id="status-title" aria-live="polite">Đang theo dõi</h2>
+            </div>
+          </div>
+          <p id="status-detail">Đã lấy tư thế chuẩn. Thuật toán đang chờ tín hiệu va đập.</p>
+          <div class="state-bottom">
+            <span id="progress-label">Giữ tư thế</span>
+            <strong id="progress-value">0,00 / 1,00 s</strong>
+          </div>
+          <progress id="hold-progress" max="1000" value="0" aria-labelledby="progress-label"></progress>
+          <button id="ack-button" class="button ack" type="button" hidden>Xác nhận cảnh báo</button>
+        </section>
+
+        <section id="scenario-panel" class="panel scenario-panel" aria-labelledby="scenario-title">
+          <div class="section-head">
+            <div><h2 id="scenario-title">Kịch bản thử</h2><p>Chọn một tình huống để phát dữ liệu.</p></div>
+          </div>
+          <div class="scenario-list">
+            <button class="scenario" type="button" data-scenario="fall">
+              <span class="scenario-icon orange" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="m4 5 7 7 3-3 6 9m-5 0h5v-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+              <span><strong>Té ngã</strong><small>Va đập và giữ tư thế nghiêng</small></span><span class="scenario-arrow" aria-hidden="true">›</span>
+            </button>
+            <button class="scenario" type="button" data-scenario="bump">
+              <span class="scenario-icon blue" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v5m0 8v5M3 12h5m8 0h5M6 6l2 2m8 8 2 2M6 18l2-2m8-8 2-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+              <span><strong>Va chạm</strong><small>Va đập rồi trở về tư thế đứng</small></span><span class="scenario-arrow" aria-hidden="true">›</span>
+            </button>
+            <button class="scenario" type="button" data-scenario="tilt">
+              <span class="scenario-icon violet" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M4 19h16M4 19l12-12M8 15a7 7 0 0 1 3 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></span>
+              <span><strong>Nghiêng chậm</strong><small>Đổi tư thế khi không có va đập</small></span><span class="scenario-arrow" aria-hidden="true">›</span>
+            </button>
+          </div>
+        </section>
+
+        <section id="device-controls" class="panel scenario-panel" aria-labelledby="device-controls-title" hidden>
+          <div class="section-head">
+            <div><h2 id="device-controls-title">Điều khiển thiết bị</h2><p id="device-note">Chờ thiết bị gửi dữ liệu.</p></div>
+          </div>
+          <div class="device-buttons">
+            <button class="button" id="calibrate-button" type="button" disabled>Hiệu chuẩn lại</button>
+            <button class="button" id="device-test-button" type="button" disabled>Thử té ngã</button>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <section class="panel history" aria-labelledby="history-title">
+      <div class="section-head">
+        <div><h2 id="history-title">Nhật ký hoạt động</h2><p id="history-note">Chọn một kịch bản để xem kết quả xác minh.</p></div>
+        <button class="button export" id="export-button" type="button" disabled>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Xuất CSV
+        </button>
+      </div>
+      <ul id="event-list" class="event-list" aria-live="polite"></ul>
+    </section>
+
+    <footer class="page-footer">
+      <span>ESP32 DevKit V1 · MPU6050 · MQTT</span>
+      <a href="Report/lab3_report.docx" download>Báo cáo kỹ thuật</a>
+    </footer>
+  </main>
+</body>
+</html>
