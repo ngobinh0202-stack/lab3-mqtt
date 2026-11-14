@@ -5,180 +5,145 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const {spawnSync} = require("node:child_process");
-const {Detector, demoSample, limits} = require("../model.js");
+const {AlertTracker, Actuators, altitudeFromPressure, validTelemetry} = require("../model.js");
 require("../mqtt-wire.js");
 
-const readyPose = [0, 0, 1, 0, 0, 0];
-const tilted = [0.984, 0, 0.16, 0, 2.2, 0];
-const impact = [0.28, 0, 3.38, 0, 76, 0];
-const phases = ["CALIBRATING", "READY", "VERIFY", "ALARM", "SENSOR_FAULT"];
-const decisions = ["calibration", "ready", "impact", "confirmed", "timeout", "sample_gap", "sensor_fault", "acknowledged"];
-const operations = [];
+let tracker;
+let actuators;
+let active;
+const transcript = [];
 const expected = [];
-const traces = {};
-let model;
-let time;
-
-function record(command) {
-  operations.push(command);
-  expected.push([phases.indexOf(model.state), decisions.indexOf(model.decision), model.count, model.held].join(","));
-}
 
 function reset() {
-  model = new Detector();
-  time = 0;
-  record("R");
+  tracker = new AlertTracker();
+  actuators = new Actuators();
+  active = 0;
+  transcript.push("reset");
 }
 
-function sample(values, gap = limits.period) {
-  time += gap;
-  const result = model.sample(time, ...values);
-  record(["S", time, ...values].join(" "));
-  return result;
+function output(prefix = "") {
+  const state = actuators.get(active);
+  expected.push(prefix + [active, Number(state.mode === "AUTO"), Number(state.led), Number(state.buzzer)].join(" "));
 }
 
-function hold(values, steps) {
-  for (let index = 0; index < steps; index++) sample(values);
+function sample(ms, temperature, altitude, flags) {
+  const valid = temperature !== null;
+  transcript.push(["sample", ms, Number(valid), temperature ?? 0, altitude ?? 0].join(" "));
+  active = tracker.update(ms, temperature, altitude);
+  assert.equal(active, flags);
+  output();
 }
 
-function calibrate() {
-  hold(readyPose, limits.calibrationSamples);
-  assert.equal(model.state, "READY");
-}
-
-const cases = [
-  ["Té ngã", "fall", "ALARM", 1],
-  ["Va chạm", "bump", "READY", 0],
-  ["Nghiêng chậm", "tilt", "READY", 0]
-];
-for (const [name, scenario, phase, count] of cases) {
-  reset();
-  calibrate();
-  const begin = time;
-  const samples = [];
-  for (let step = 20; step <= 3800; step += 20) {
-    samples.push(sample(demoSample(scenario, step, begin + step)));
-  }
-  assert.equal(model.state, phase);
-  assert.equal(model.count, count);
-  traces[scenario] = samples;
-  console.log(name + " → " + phase + ", cảnh báo: " + count);
+function command(index, accepted, led, buzzer) {
+  const commands = ["auto", "manual", "led-on", "led-off", "buzzer-on", "buzzer-off"];
+  transcript.push("cmd " + index);
+  assert.equal(actuators.apply(commands[index]), accepted);
+  const state = actuators.get(active);
+  assert.equal(state.led, led);
+  assert.equal(state.buzzer, buzzer);
+  output(Number(accepted) + " ");
 }
 
 reset();
-calibrate();
-hold(tilted, 70);
-sample(impact);
-hold(tilted, 135);
-assert.equal(model.state, "READY");
-assert.equal(model.count, 0);
-console.log("Va đập khi đang nghiêng, cùng hướng sau va đập → READY");
+sample(0, 36.5, 60, 0);
+sample(1000, 35, 61, 0);
+sample(2000, 38, 62, 0);
+sample(3000, 39.2, 62, 2);
+sample(4000, 34, 62, 1);
+sample(5000, 36.5, 69.99, 0);
+sample(6000, 39.2, 77.99, 6);
+sample(7000, 36.5, 77.99, 4);
+sample(10000, 36.5, 77.99, 4);
+sample(11000, 36.5, 77.99, 0);
+sample(12000, 36.5, 61, 4);
+sample(13000, null, null, 8);
+sample(14000, 36.5, 500, 0);
+sample(17000, 36.5, 60, 0);
+command(2, false, false, false);
+command(1, true, false, false);
+command(2, true, true, false);
+command(4, true, true, true);
+command(3, true, false, true);
+command(1, true, false, true);
+command(5, true, false, false);
+sample(18000, 39.2, 60, 2);
+command(0, true, true, true);
+sample(19000, 36.5, 60, 0);
+command(1, true, false, false);
 
 reset();
-calibrate();
-sample(impact);
-hold(tilted, 30);
-sample(tilted, 120);
-hold(tilted, 70);
-assert.equal(model.state, "READY");
-assert.equal(model.decision, "sample_gap");
-assert.equal(model.count, 0);
-console.log("Gián đoạn lấy mẫu 120 ms trong VERIFY → READY");
+sample(0xfffffff0, 36.5, 60, 0);
+sample(984, 36.5, 80, 4);
+sample(1984, 36.5, 81, 4);
 
-reset();
-calibrate();
-sample(impact);
-hold(tilted, 65);
-assert.equal(model.count, 1);
-model.fault();
-record("F");
-assert.equal(model.state, "ALARM");
-hold(readyPose, 70);
-assert.equal(model.count, 1);
-assert.equal(model.acknowledge(), true);
-record("A");
-assert.equal(model.state, "READY");
-assert.equal(model.count, 1);
-console.log("Giữ ALARM qua lỗi cảm biến, xác nhận không tăng bộ đếm → READY");
-
-reset();
-calibrate();
-model.fault();
-record("F");
-assert.equal(model.state, "SENSOR_FAULT");
-hold(readyPose, 49);
-assert.equal(model.state, "CALIBRATING");
-sample(readyPose);
-assert.equal(model.state, "READY");
-console.log("Mất cảm biến, phục hồi sau 50 mẫu tĩnh → READY");
-
-if (!process.argv.includes("--web-only")) {
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "fall-detection-"));
-  try {
-    const executable = path.join(temporary, "detector_trace");
-    const compile = spawnSync(process.env.CXX || "g++", [
-      "-std=c++11", "-Wall", "-Wextra", "-Werror", "-pedantic",
-      path.join(__dirname, "detector_trace.cpp"), "-o", executable
-    ], {encoding: "utf8"});
-    assert.equal(compile.status, 0, compile.error?.message || compile.stderr);
-    const result = spawnSync(executable, {input: operations.join("\n") + "\n", encoding: "utf8"});
-    assert.equal(result.status, 0, result.error?.message || result.stderr);
-    const rows = result.stdout.trimEnd().split("\n");
-    assert.equal(rows.length, expected.length);
-    rows.forEach((row, index) => assert.equal(row, expected[index], operations[index] + " tại dòng " + (index + 1)));
-    console.log("JavaScript và C++ khớp " + rows.length + " bước xử lý.");
-  } finally {
-    fs.rmSync(temporary, {recursive: true, force: true});
-  }
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "runner-core-"));
+try {
+  const binary = path.join(tmp, "runner-core");
+  const compile = spawnSync(process.env.CXX || "g++", [
+    "-std=c++11", "-Wall", "-Wextra", "-Werror", "-pedantic",
+    path.join(__dirname, "runner_core.cpp"), "-o", binary
+  ], {encoding: "utf8"});
+  assert.equal(compile.status, 0, compile.stderr || compile.error?.message);
+  const run = spawnSync(binary, {encoding: "utf8", input: transcript.join("\n") + "\n"});
+  assert.equal(run.status, 0, run.stderr || run.error?.message);
+  const [bmp, altitude, ...actual] = run.stdout.trim().split("\n");
+  assert.equal(bmp, "BMP180 15.0 69964");
+  altitude.split(" ").slice(1).map(Number).forEach((measured, index) => {
+    assert.ok(Math.abs(measured - altitudeFromPressure([101325, 100600, 100384][index])) < 0.01);
+  });
+  assert.deepEqual(actual, expected);
+  console.log("BMP180: ví dụ Bosch cho 15,0 °C và 69.964 Pa; công thức độ cao khớp.");
+  console.log("FreeRTOS logic: " + actual.length + " bước cảnh báo/điều khiển khớp giữa C++ và JS.");
+} finally {
+  fs.rmSync(tmp, {recursive: true, force: true});
 }
+
+const telemetry = {seq: 50, ms: 50000, t: 36.5, p: 100600, h: 60.52, alerts: 0,
+  mode: "AUTO", led: false, buzzer: false, ack: "", ok: false};
+assert.ok(validTelemetry(telemetry));
+assert.ok(validTelemetry({...telemetry, t: null, p: null, h: null, alerts: 8}));
+assert.equal(validTelemetry({...telemetry, alerts: 8}), false);
+assert.equal(validTelemetry({...telemetry, h: 0}), false);
+assert.equal(validTelemetry({...telemetry, ack: "invalid"}), false);
 
 class FakeSocket {
   static OPEN = 1;
   static CLOSING = 2;
-
-  constructor(url, protocol) {
-    this.url = url;
-    this.protocol = protocol;
-    this.readyState = 0;
-    this.sent = [];
-  }
-
+  readyState = 0;
+  sent = [];
+  constructor(url, protocol) { this.url = url; this.protocol = protocol; }
   send(bytes) { this.sent.push([...bytes]); }
   close() { this.readyState = 3; }
   deliver(bytes) { this.onmessage({data: Uint8Array.from(bytes).buffer}); }
 }
-
 globalThis.WebSocket = FakeSocket;
-const status = [];
-const payloads = [];
-const root = "falldetection/ndd/test";
-const session = new globalThis.MqttWire({
-  url: "wss://example.invalid/mqtt", topic: root + "/telemetry",
-  status: (state) => status.push(state),
-  message: (text) => payloads.push(text)
-});
-const socket = session.socket;
-const topic = Buffer.from(session.topic);
-const body = [0, topic.length, ...topic, ...Buffer.from('{"valid":true}')];
+
+const states = [];
+const messages = [];
+const root = "runner/lab3/a1b2c3d4";
+const mqtt = new globalThis.MqttWire({url: "wss://example.invalid/mqtt",
+  topic: root + "/telemetry", message: (value) => messages.push(JSON.parse(value)), status: (value) => states.push(value)});
+const socket = mqtt.socket;
+assert.equal(socket.protocol, "mqtt");
 socket.readyState = FakeSocket.OPEN;
 socket.onopen();
-assert.equal(socket.protocol, "mqtt");
 assert.equal(socket.sent[0][0], 0x10);
 socket.deliver([0x20, 2]);
 socket.deliver([0, 0]);
 assert.equal(socket.sent[1][0], 0x82);
-assert.deepEqual(status, []);
-socket.deliver([0x90, 3, 0, 1, 0, 0x31, body.length, ...body]);
-assert.deepEqual(status, ["ready"]);
-assert.deepEqual(payloads, []);
-socket.deliver([0x30, body.length, ...body]);
-assert.deepEqual(payloads, ['{"valid":true}']);
-assert.equal(session.publish(root + "/cmd", "ack"), true);
+socket.deliver([0x90, 3, 0, 1, 0]);
+const topic = Buffer.from(mqtt.topic);
+const body = [0, topic.length, ...topic, ...Buffer.from(JSON.stringify(telemetry))];
+const remaining = [body.length % 128 | 128, Math.floor(body.length / 128)];
+socket.deliver([0x31, ...remaining, ...body]);
+assert.deepEqual(messages, []);
+socket.deliver([0x30, ...remaining, ...body.slice(0, 75)]);
+socket.deliver(body.slice(75));
+assert.deepEqual(messages, [telemetry]);
+assert.ok(mqtt.publish(root + "/cmd", "5ee1bb9a:led-on"));
 assert.equal(socket.sent[2][0], 0x30);
-session.stop("manual");
+assert.match(Buffer.from(socket.sent[2]).toString(), /runner\/lab3\/a1b2c3d4\/cmd5ee1bb9a:led-on$/);
+mqtt.stop("manual");
+assert.deepEqual(states, ["ready", "manual"]);
 assert.deepEqual(socket.sent[3], [0xe0, 0]);
-assert.deepEqual(status, ["ready", "manual"]);
-console.log("MQTT: CONNECT, SUBACK, phân mảnh, lọc retained, lệnh và DISCONNECT hợp lệ.");
-
-const traceIndex = process.argv.indexOf("--trace");
-if (traceIndex !== -1) fs.writeFileSync(process.argv[traceIndex + 1], JSON.stringify(traces));
+console.log("MQTT: kiểm tra đăng ký, phân mảnh, retained, gói lệnh và ngắt kết nối.");
