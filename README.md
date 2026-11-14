@@ -2,13 +2,13 @@
 
 **ESP32 DevKit V1 · BMP180 · FreeRTOS · MQTT**
 
-[Dashboard Runner Monitor](https://lab3-runner-bmp180.anvd0910.chatgpt.site) · [Báo cáo Word](Report/Lab3_De1_RunnerMonitor.docx) · [Mã và mạch Wokwi](Wokwi/) · [Tạo dự án ESP32 trên Wokwi](https://wokwi.com/projects/new/esp32)
+[Mở dashboard](https://lab3-runner-bmp180.anvd0910.chatgpt.site/) · [Báo cáo Word](Report/Lab3_De1_RunnerMonitor.docx) · [Mã và mạch Wokwi](Wokwi/) · [Chạy mô phỏng](#5-chạy-wokwi-và-kết-nối-dashboard)
 
 ## 1. Tổng quan
 
 ESP32 lấy mẫu BMP180 mỗi 1 giây, in nhiệt độ, áp suất và độ cao trên Serial Monitor, rồi phát dữ liệu qua MQTT. Dashboard hiển thị ba số đo, hai biểu đồ, nhật ký cảnh báo và nút tải CSV. Thiết bị bật đèn LED và còi khi nhiệt độ nằm ngoài ngưỡng hoặc độ cao thay đổi nhanh. Chế độ MANUAL cho phép bật hoặc tắt riêng từng đầu ra.
 
-Dashboard có hai nguồn dữ liệu:
+Mở dashboard trực tuyến bằng tài khoản ChatGPT có quyền truy cập. Để chạy từ máy, tải nhánh này bằng **Code → Download ZIP**, giải nén rồi mở `index.html` bằng Chrome hoặc Edge. Dashboard có hai nguồn dữ liệu.
 
 - **Mô phỏng** tạo số đo trực tiếp trong trình duyệt. Bốn kịch bản gồm bình thường, nhiệt độ cao, nhiệt độ thấp và độ cao đổi nhanh.
 - **ESP32 / MQTT** hiển thị bản tin cảm biến thật từ ESP32 hoặc linh kiện BMP180 mô phỏng trên Wokwi. Nút điều khiển chỉ hoạt động khi dashboard có số đo gần đây và báo kết quả theo phản hồi của ESP32.
@@ -60,12 +60,25 @@ Hai đầu mút 35 °C và 38 °C nằm trong khoảng thử. Chuyển sang MANU
 
 ## 5. Chạy Wokwi và kết nối dashboard
 
-1. Tạo [dự án ESP32 Arduino trên Wokwi](https://wokwi.com/projects/new/esp32). Dán [sketch.ino](Wokwi/sketch.ino) và [diagram.json](Wokwi/diagram.json) vào hai tab tương ứng.
-2. Dùng menu tạo tệp của trình soạn thảo để thêm [Bmp180.h](Wokwi/Bmp180.h) và [RunnerLogic.h](Wokwi/RunnerLogic.h). Thêm **PubSubClient** bằng **Library Manager**. [libraries.txt](Wokwi/libraries.txt) ghim phiên bản 2.8.
-3. Bấm **Start the simulation**. Serial Monitor chạy 115200 baud. Chờ dòng `[TX] MQTT OK | Base topic: …`. Ba dòng đầu của task cho biết READ và ALERT chạy Core 1, TX chạy Core 0.
-4. Mở [dashboard](https://lab3-runner-bmp180.anvd0910.chatgpt.site) hoặc mở `index.html` từ thư mục đã tải về. Chọn **ESP32 / MQTT**, dán Base topic đầy đủ và bấm **Kết nối**.
-5. Bấm vào BMP180 trên sơ đồ để điều chỉnh Temperature và Pressure trong lúc mô phỏng. Wokwi hiển thị áp suất theo hPa, còn thiết lập `pressure` trong `diagram.json` dùng Pa.
-6. Chọn **MANUAL** và chờ dòng «ESP32 đã xác nhận lệnh». Bật/tắt **Đèn LED** và **Còi** riêng, đồng thời quan sát mạch Wokwi. Chọn lại AUTO để kiểm tra cảnh báo theo ngưỡng.
+### Wokwi trong VS Code
+
+1. Cài [PlatformIO IDE](https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide) và [Wokwi for VS Code](https://docs.wokwi.com/vscode/getting-started). Cấp license của Wokwi nếu tiện ích yêu cầu.
+2. Mở riêng thư mục [Wokwi/](Wokwi/) trong VS Code. Chạy **PlatformIO → Build** hoặc gõ `pio run` trong terminal của PlatformIO.
+3. Bấm `F1` rồi chọn **Wokwi: Start Simulator**. [wokwi.toml](Wokwi/wokwi.toml) trỏ đến firmware do [platformio.ini](Wokwi/platformio.ini) biên dịch.
+
+### Wokwi trên trình duyệt
+
+1. Tạo [dự án ESP32 Arduino](https://wokwi.com/projects/new/esp32). Dán [sketch.ino](Wokwi/sketch.ino) và [diagram.json](Wokwi/diagram.json) vào hai tab tương ứng.
+2. Thêm hai tệp [Bmp180.h](Wokwi/Bmp180.h) và [RunnerLogic.h](Wokwi/RunnerLogic.h) bằng menu tạo tệp của trình soạn thảo. Thêm **PubSubClient 2.8** qua **Library Manager**, hoặc dùng [libraries.txt](Wokwi/libraries.txt).
+3. Bấm **Start the simulation**.
+
+### Kết nối và điều khiển
+
+1. Chờ Serial Monitor (115200 baud) in `[TX] MQTT OK | Base topic: …`. Ba dòng đầu cho biết READ và ALERT chạy Core 1, TX chạy Core 0.
+2. Trên dashboard, chọn **ESP32 / MQTT**, nhập địa chỉ broker mặc định và dán phần phía sau `Base topic:`. Bấm **Kết nối**. Khi nhận mẫu, dashboard hiện **ESP32 trực tuyến**.
+3. Trong lúc mô phỏng, bấm vào BMP180 để chỉnh Temperature và Pressure. Wokwi hiển thị áp suất theo hPa, còn `pressure` trong `diagram.json` dùng Pa.
+4. Chọn **MANUAL** và chờ «ESP32 đã xác nhận lệnh». Bật riêng **Đèn LED** và **Còi** rồi quan sát mạch. Chọn **AUTO** để thiết bị lại tự điều khiển theo ngưỡng.
+5. Sau khi khởi động lại ESP32, sao chép Base topic mới và kết nối lại. Nếu dashboard chỉ báo broker đã kết nối, kiểm tra Wokwi đang chạy và Base topic trùng với Serial Monitor.
 
 ### Địa chỉ MQTT
 
@@ -90,7 +103,7 @@ Mỗi lần khởi động, ESP32 tạo một Base topic mới. Bản tin JSON d
 | Điều khiển độc lập | MANUAL → LED bật → còi bật → LED tắt | Kết thúc LED tắt, còi bật |
 | Dừng Wokwi | Bấm **Stop** | Khi bản tin hết hạn, dashboard báo chờ dữ liệu và khóa nút điều khiển |
 
-Chạy `node tests/verify.js` với Node.js và trình biên dịch `g++` để kiểm tra ví dụ chuẩn BMP180, đối chiếu 28 bước C++ và JavaScript, kiểm tra gói MQTT và xác nhận lệnh. Firmware biên dịch với Arduino ESP32 2.0.17 và PubSubClient 2.8.
+Chạy `node tests/verify.js` với Node.js và trình biên dịch `g++` để kiểm tra ví dụ chuẩn BMP180, đối chiếu 28 bước C++ và JavaScript, kiểm tra gói MQTT và xác nhận lệnh. Firmware biên dịch với Arduino ESP32 2.0.17 và PubSubClient 2.8. Trong phiên Wokwi, ESP32 gửi mẫu 36,5 °C, 100.600 Pa và 60,53 m qua MQTT. Đổi nhiệt độ qua ngưỡng và giảm áp suất đầu vào tạo các cờ 2, 1 và 4. Chuỗi lệnh MANUAL xác nhận LED có thể tắt khi còi vẫn bật.
 
 ### Tệp dự án
 
@@ -98,7 +111,7 @@ Chạy `node tests/verify.js` với Node.js và trình biên dịch `g++` để 
 | --- | --- |
 | `index.html`, `styles.css`, `app.js` | Dashboard và tương tác |
 | `model.js`, `mqtt-wire.js` | Công thức, cảnh báo mô phỏng và MQTT 3.1.1 qua WebSocket |
-| `Wokwi/` | Firmware, thư viện, phần mô phỏng và sơ đồ nối dây |
+| `Wokwi/` | Firmware, sơ đồ nối dây, `platformio.ini` và `wokwi.toml` |
 | `Report/` | Báo cáo Word |
 | `tests/` | Kiểm thử C++ và JavaScript |
 
