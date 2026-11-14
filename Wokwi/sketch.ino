@@ -1,298 +1,218 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <Wire.h>
 #include <PubSubClient.h>
 #include <esp_system.h>
-#include "FallDetector.h"
+#include <stdio.h>
+#include <string.h>
+#include "Bmp180.h"
+#include "RunnerLogic.h"
+
+using runner::Command;
 
 constexpr uint8_t sdaPin = 21;
 constexpr uint8_t sclPin = 22;
 constexpr uint8_t ledPin = 26;
 constexpr uint8_t buzzerPin = 27;
-constexpr uint8_t ackPin = 25;
-constexpr uint8_t testPin = 32;
-constexpr uint8_t mpuAddress = 0x68;
-
+constexpr char wifiName[] = "Wokwi-GUEST";
+constexpr char wifiPassword[] = "";
 constexpr char brokerHost[] = "broker.emqx.io";
 constexpr uint16_t brokerPort = 1883;
-constexpr uint32_t telemetryPeriodMs = 500;
 
-enum class Command { Ack, Calibrate, Test };
-
-struct Snapshot {
+struct Sample {
+  uint32_t sequence;
   uint32_t ms;
-  uint32_t impactMs;
-  bool hasImpact;
-  bool test;
-  Reading reading;
-  Phase phase;
-  Decision decision;
-  uint32_t count;
-  uint32_t held;
-  float peak;
-  int calibrationCount;
+  bool valid;
+  float temperatureC;
+  int32_t pressurePa;
+  float altitudeM;
 };
 
-void publishSnapshot(const Snapshot& sample);
-
-struct Button {
-  explicit Button(uint8_t pin) : pin(pin) {}
-
-  bool pressed(uint32_t now) {
-    const bool down = digitalRead(pin) == LOW;
-    if (down != last) {
-      last = down;
-      changedAt = now;
-    }
-    if (down == stable || now - changedAt < 40) return false;
-    stable = down;
-    return stable;
-  }
-
-  uint8_t pin;
-  bool last = false;
-  bool stable = false;
-  uint32_t changedAt = 0;
+struct AlertSample {
+  uint32_t sequence;
+  uint32_t ms;
+  bool valid;
+  float temperatureC;
+  float altitudeM;
 };
 
-QueueHandle_t sampleQueue;
+struct ControlState {
+  uint32_t sequence;
+  uint32_t commandRevision;
+  uint8_t flags;
+  bool automatic;
+  bool led;
+  bool buzzer;
+  char ackId[9];
+  bool ackOk;
+};
+
+QueueHandle_t dataQueue;
+QueueHandle_t dataAlert;
 QueueHandle_t commandQueue;
-WiFiClient transport;
-PubSubClient mqtt(transport);
-char topicRoot[64];
-char telemetryTopic[80];
-char commandTopic[80];
-char clientId[40];
+QueueHandle_t controlQueue;
 
-bool writeRegister(uint8_t address, uint8_t value) {
-  Wire.beginTransmission(mpuAddress);
-  Wire.write(address);
-  Wire.write(value);
-  return Wire.endTransmission() == 0;
+WiFiClient socketClient;
+PubSubClient mqtt(socketClient);
+char topicRoot[48];
+char telemetryTopic[64];
+char commandTopic[64];
+char clientId[32];
+
+void formatNumber(char* text, size_t size, bool valid, float value);
+void printSample(const Sample& sample);
+bool publishSample(const Sample& sample, const ControlState& control);
+
+void formatNumber(char* text, size_t size, bool valid, float value) {
+  if (valid) snprintf(text, size, "%.2f", static_cast<double>(value));
+  else snprintf(text, size, "null");
 }
 
-bool readRegisters(uint8_t address, uint8_t* buffer, size_t count) {
-  Wire.beginTransmission(mpuAddress);
-  Wire.write(address);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(mpuAddress, count, true) != count) return false;
-  for (size_t index = 0; index < count; index++) {
-    const int value = Wire.read();
-    if (value < 0) return false;
-    buffer[index] = static_cast<uint8_t>(value);
+void printSample(const Sample& sample) {
+  if (sample.valid) {
+    Serial.printf("[READ][Core 1] seq=%lu T=%.1f C P=%ld Pa H=%.2f m\n",
+      static_cast<unsigned long>(sample.sequence), sample.temperatureC,
+      static_cast<long>(sample.pressurePa), sample.altitudeM);
+  } else {
+    Serial.printf("[READ][Core 1] seq=%lu SENSOR_FAULT\n", static_cast<unsigned long>(sample.sequence));
   }
-  return true;
 }
 
-bool setupSensor() {
-  uint8_t identity;
-  return readRegisters(0x75, &identity, 1) && identity == 0x68
-      && writeRegister(0x6B, 0x01)  // Wake, use X gyro clock.
-      && writeRegister(0x1A, 0x03)  // Digital low-pass filter.
-      && writeRegister(0x19, 0x13)  // 1 kHz / (19 + 1) = 50 Hz.
-      && writeRegister(0x1B, 0x08)  // Gyroscope range ±500 °/s.
-      && writeRegister(0x1C, 0x10); // Accelerometer range ±8 g.
-}
-
-int16_t wordAt(const uint8_t* buffer, size_t index) {
-  return static_cast<int16_t>((static_cast<uint16_t>(buffer[index]) << 8) | buffer[index + 1]);
-}
-
-bool readMotion(Motion& sample) {
-  uint8_t data[14];
-  if (!readRegisters(0x3B, data, sizeof(data))) return false;
-  sample = {
-    wordAt(data, 0) / 4096.0f, wordAt(data, 2) / 4096.0f, wordAt(data, 4) / 4096.0f,
-    wordAt(data, 8) / 65.5f, wordAt(data, 10) / 65.5f, wordAt(data, 12) / 65.5f
-  };
-  return true;
-}
-
-Motion simulatedFall(uint32_t elapsed) {
-  if (elapsed < 700) return {0, 0, 1, 0, 0, 0};
-  if (elapsed < 800) return {0, 0, 0.62f, 0, 0, 0};
-  if (elapsed < 940) return {0.28f, 0, 3.38f, 0, 76, 0};
-  if (elapsed < 1200) return {0.78f, 0, 0.63f, 0, 74, 0};
-  return {0.984f, 0, 0.16f, 0, 2.2f, 0};
-}
-
-const char* phaseName(Phase phase) {
-  switch (phase) {
-    case Phase::Calibrating: return "CALIBRATING";
-    case Phase::Ready: return "READY";
-    case Phase::Verify: return "VERIFY";
-    case Phase::Alarm: return "ALARM";
-    case Phase::Fault: return "SENSOR_FAULT";
-  }
-  return "SENSOR_FAULT";
-}
-
-const char* decisionName(Decision decision) {
-  switch (decision) {
-    case Decision::Calibration: return "calibration";
-    case Decision::Ready: return "ready";
-    case Decision::Impact: return "impact";
-    case Decision::Confirmed: return "confirmed";
-    case Decision::Timeout: return "timeout";
-    case Decision::Gap: return "sample_gap";
-    case Decision::Fault: return "sensor_fault";
-    case Decision::Ack: return "acknowledged";
-  }
-  return "sensor_fault";
-}
-
-void sensorTask(void*) {
-  FallDetector detector;
-  Button acknowledge(ackPin);
-  Button testButton(testPin);
+void taskRead(void*) {
+  Serial.printf("[READ] Core %d\n", xPortGetCoreID());
+  Wire.begin(sdaPin, sclPin, 100000);
+  Wire.setTimeOut(30);
+  Bmp180 bmp;
+  bool sensorReady = false;
+  uint32_t sequence = 0;
   TickType_t wake = xTaskGetTickCount();
-  bool available = false;
-  bool testActive = false;
-  bool testAlarm = false;
-  bool haveImpact = false;
-  bool buzzerOn = false;
-  uint32_t lastSensorAttempt = 0;
-  uint32_t testStart = 0;
-  uint32_t impactTime = 0;
-  bool firstLoop = true;
 
   for (;;) {
-    const uint32_t now = millis();
-    bool startTest = testButton.pressed(now);
-    bool requestAck = acknowledge.pressed(now);
-    bool requestCalibration = false;
-    Command command;
-    while (xQueueReceive(commandQueue, &command, 0) == pdTRUE) {
-      if (command == Command::Ack) requestAck = true;
-      if (command == Command::Calibrate) requestCalibration = true;
-      if (command == Command::Test) startTest = true;
-    }
-    if (requestAck && detector.acknowledge()) {
-      testAlarm = false;
-      testActive = false;
-      if (!available) detector.fault();
-    }
-    if (requestCalibration && detector.phase == Phase::Ready && !testActive) detector.calibrate();
-    if (startTest && detector.phase == Phase::Ready && !testActive) {
-      testActive = true;
-      testStart = now;
-    }
-    if (testActive && now - testStart >= 3800) {
-      testActive = false;
-      if (!available) detector.fault();
-    }
-    if (!available && (firstLoop || now - lastSensorAttempt >= 1000)) {
-      lastSensorAttempt = now;
-      available = setupSensor();
-    }
-    firstLoop = false;
+    if (!sensorReady) sensorReady = bmp.begin();
+    Bmp180Reading raw{};
+    sensorReady = sensorReady && bmp.measure(raw);
+    Sample sample{++sequence, millis(), sensorReady, raw.temperatureC, raw.pressurePa, 0.0f};
+    if (sample.valid) sample.altitudeM = runner::altitudeFromPressure(sample.pressurePa);
+    const AlertSample alert{sample.sequence, sample.ms, sample.valid, sample.temperatureC, sample.altitudeM};
 
-    Motion motion{};
-    const bool readOk = available && readMotion(motion);
-    if (!readOk) available = false;
-    if (testActive) motion = simulatedFall(now - testStart);
-    const Phase previous = detector.phase;
-    Reading reading;
-    if (readOk || testActive) reading = detector.sample(now, motion);
-    else detector.fault();
-    if (previous != Phase::Verify && detector.phase == Phase::Verify) {
-      impactTime = now;
-      haveImpact = true;
-    }
-    if (previous != Phase::Alarm && detector.phase == Phase::Alarm) testAlarm = testActive;
+    printSample(sample);
+    xQueueOverwrite(dataQueue, &sample);
+    xQueueOverwrite(dataAlert, &alert);
+    vTaskDelayUntil(&wake, pdMS_TO_TICKS(runner::samplePeriodMs));
+  }
+}
 
-    const bool alarm = detector.phase == Phase::Alarm;
-    const bool fault = detector.phase == Phase::Fault;
-    digitalWrite(ledPin, (alarm && now % 600 < 300) || (fault && now % 1500 < 100) ? HIGH : LOW);
-    const bool sound = alarm && now % 1000 < 300;
-    if (sound != buzzerOn) {
-      if (sound) tone(buzzerPin, 1800);
+void taskAlert(void*) {
+  Serial.printf("[ALERT] Core %d\n", xPortGetCoreID());
+  runner::AlertTracker tracker;
+  runner::Actuators actuators;
+  ControlState control{};
+  control.automatic = true;
+
+  for (;;) {
+    AlertSample sample{};
+    const bool newSample = xQueueReceive(dataAlert, &sample, pdMS_TO_TICKS(50)) == pdTRUE;
+    if (newSample) {
+      const uint8_t flags = tracker.update(sample.ms, sample.valid, sample.temperatureC, sample.altitudeM);
+      if (flags != control.flags) Serial.printf("[ALERT][Core 1] flags=%u\n", flags);
+      control.sequence = sample.sequence;
+      control.flags = flags;
+    }
+
+    bool newCommand = false;
+    Command command{};
+    if (xQueueReceive(commandQueue, &command, 0) == pdTRUE) {
+      control.ackOk = actuators.apply(command.kind);
+      memcpy(control.ackId, command.id, sizeof(control.ackId));
+      ++control.commandRevision;
+      newCommand = true;
+    }
+    if (!newSample && !newCommand) continue;
+
+    const runner::Outputs outputs = actuators.get(control.flags);
+    if (outputs.led != control.led) digitalWrite(ledPin, outputs.led ? HIGH : LOW);
+    if (outputs.buzzer != control.buzzer) {
+      if (outputs.buzzer) tone(buzzerPin, 1800);
       else noTone(buzzerPin);
-      buzzerOn = sound;
     }
-    const Snapshot snapshot{
-      now, impactTime, haveImpact, testActive || testAlarm, reading, detector.phase,
-      detector.decision, detector.count, detector.heldMs, detector.peakG, detector.calibrationCount
-    };
-    xQueueOverwrite(sampleQueue, &snapshot);
+    control.automatic = actuators.automatic;
+    control.led = outputs.led;
+    control.buzzer = outputs.buzzer;
+    xQueueOverwrite(controlQueue, &control);
 
-    // Resynchronize after an overrun instead of generating catch-up samples in a burst.
-    if (xTaskGetTickCount() - wake > pdMS_TO_TICKS(FallDetector::periodMs)) wake = xTaskGetTickCount();
-    vTaskDelayUntil(&wake, pdMS_TO_TICKS(FallDetector::periodMs));
+    if (newCommand) {
+      Serial.printf("[ALERT][Core 1] cmd=%s ok=%d mode=%s led=%d buzzer=%d\n", control.ackId,
+        control.ackOk, control.automatic ? "AUTO" : "MANUAL", control.led, control.buzzer);
+    }
   }
 }
 
-void receiveCommand(char* topic, byte* data, unsigned int length) {
-  if (strcmp(topic, commandTopic) != 0) return;
-  Command command;
-  if (length == 3 && memcmp(data, "ack", 3) == 0) command = Command::Ack;
-  else if (length == 9 && memcmp(data, "calibrate", 9) == 0) command = Command::Calibrate;
-  else if (length == 4 && memcmp(data, "test", 4) == 0) command = Command::Test;
-  else return;
-  xQueueSend(commandQueue, &command, 0);
+void receiveCommand(char* topic, byte* payload, unsigned int length) {
+  Command command{};
+  if (strcmp(topic, commandTopic) != 0
+      || !runner::parseCommand(reinterpret_cast<const char*>(payload), length, command)) return;
+  if (xQueueSend(commandQueue, &command, 0) != pdTRUE) Serial.println("[TX] Command queue full");
 }
 
-void formatNumber(char* buffer, size_t capacity, float value) {
-  if (isfinite(value)) snprintf(buffer, capacity, "%.3f", value);
-  else snprintf(buffer, capacity, "null");
-}
+bool publishSample(const Sample& sample, const ControlState& control) {
+  char temperature[16], pressure[16], altitude[16], payload[384];
+  formatNumber(temperature, sizeof(temperature), sample.valid, sample.temperatureC);
+  formatNumber(altitude, sizeof(altitude), sample.valid, sample.altitudeM);
+  if (sample.valid) snprintf(pressure, sizeof(pressure), "%ld", static_cast<long>(sample.pressurePa));
+  else snprintf(pressure, sizeof(pressure), "null");
 
-void publishSnapshot(const Snapshot& sample) {
-  char accel[16], gyro[16], tilt[16], peak[16], impact[16], payload[464];
-  formatNumber(accel, sizeof(accel), sample.reading.accel);
-  formatNumber(gyro, sizeof(gyro), sample.reading.gyro);
-  formatNumber(tilt, sizeof(tilt), sample.reading.tilt);
-  formatNumber(peak, sizeof(peak), sample.peak);
-  if (sample.hasImpact) snprintf(impact, sizeof(impact), "%lu", static_cast<unsigned long>(sample.impactMs));
-  else snprintf(impact, sizeof(impact), "null");
-  const bool alarm = sample.phase == Phase::Alarm;
   const int length = snprintf(payload, sizeof(payload),
-    "{\"ms\":%lu,\"source\":\"%s\",\"state\":\"%s\",\"decision\":\"%s\","
-    "\"accel_g\":%s,\"gyro_dps\":%s,\"tilt_deg\":%s,\"peak_g\":%s,\"impact_ms\":%s,"
-    "\"held_ms\":%lu,\"event_count\":%lu,\"calibration_samples\":%d,\"led\":%s,\"buzzer\":%s}",
-    static_cast<unsigned long>(sample.ms), sample.test ? "TEST" : "MPU6050",
-    phaseName(sample.phase), decisionName(sample.decision), accel, gyro, tilt, peak, impact,
-    static_cast<unsigned long>(sample.held), static_cast<unsigned long>(sample.count),
-    sample.calibrationCount, alarm ? "true" : "false", alarm ? "true" : "false");
-  if (length > 0 && static_cast<size_t>(length) < sizeof(payload) && mqtt.connected()) {
-    mqtt.publish(telemetryTopic, payload, false);
-  }
-  Serial.printf("%lu ms | %s | %s | a=%s g | gyro=%s deg/s | tilt=%s deg | count=%lu\n",
-    static_cast<unsigned long>(sample.ms), sample.test ? "TEST" : "MPU6050", phaseName(sample.phase),
-    accel, gyro, tilt, static_cast<unsigned long>(sample.count));
+    "{\"seq\":%lu,\"ms\":%lu,\"t\":%s,\"p\":%s,\"h\":%s,\"alerts\":%u,"
+    "\"mode\":\"%s\",\"led\":%s,\"buzzer\":%s,\"ack\":\"%s\",\"ok\":%s}",
+    static_cast<unsigned long>(sample.sequence), static_cast<unsigned long>(sample.ms),
+    temperature, pressure, altitude, control.flags, control.automatic ? "AUTO" : "MANUAL",
+    control.led ? "true" : "false", control.buzzer ? "true" : "false",
+    control.ackId, control.ackOk ? "true" : "false");
+  return length > 0 && static_cast<size_t>(length) < sizeof(payload)
+    && mqtt.publish(telemetryTopic, payload, false);
 }
 
-void networkTask(void*) {
-  mqtt.setServer(brokerHost, brokerPort);
-  mqtt.setCallback(receiveCommand);
-  mqtt.setBufferSize(640);
-  mqtt.setSocketTimeout(2);
+void taskTransmit(void*) {
+  Serial.printf("[TX] Core %d\n", xPortGetCoreID());
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
-  WiFi.begin("Wokwi-GUEST", "", 6);
-  uint32_t lastAttempt = millis() - 5000;
-  uint32_t lastReport = 0;
+  WiFi.begin(wifiName, wifiPassword, 6);
+  mqtt.setServer(brokerHost, brokerPort);
+  mqtt.setCallback(receiveCommand);
+  mqtt.setBufferSize(512);
+  mqtt.setSocketTimeout(2);
+  mqtt.setKeepAlive(90);
+  uint32_t lastAttempt = millis() - 3000;
+  uint32_t lastSentSequence = 0;
+  uint32_t lastSentRevision = 0;
 
   for (;;) {
     const uint32_t now = millis();
     if (WiFi.status() != WL_CONNECTED) {
-      if (mqtt.connected()) mqtt.disconnect();
-    } else if (!mqtt.connected() && now - lastAttempt >= 5000) {
+      socketClient.stop();
+    } else if (!mqtt.connected() && now - lastAttempt >= 3000) {
       lastAttempt = now;
       if (mqtt.connect(clientId) && mqtt.subscribe(commandTopic, 0)) {
-        Serial.printf("MQTT OK | Base topic: %s\n", topicRoot);
+        lastSentSequence = 0;
+        lastSentRevision = 0;
+        Serial.printf("[TX] MQTT OK | Base topic: %s\n", topicRoot);
       } else {
-        Serial.printf("MQTT retry | state=%d\n", mqtt.state());
+        Serial.printf("[TX] MQTT retry rc=%d\n", mqtt.state());
         if (mqtt.connected()) mqtt.disconnect();
       }
     }
-    if (mqtt.connected()) mqtt.loop();
-    if (now - lastReport >= telemetryPeriodMs) {
-      lastReport = now;
-      Snapshot snapshot{};
-      if (xQueuePeek(sampleQueue, &snapshot, 0) == pdTRUE) publishSnapshot(snapshot);
+    if (mqtt.connected() && mqtt.loop()) {
+      Sample sample{};
+      ControlState control{};
+      if (xQueuePeek(dataQueue, &sample, 0) == pdTRUE
+          && xQueuePeek(controlQueue, &control, 0) == pdTRUE
+          && sample.sequence == control.sequence
+          && (sample.sequence != lastSentSequence || control.commandRevision != lastSentRevision)
+          && publishSample(sample, control)) {
+        lastSentSequence = sample.sequence;
+        lastSentRevision = control.commandRevision;
+      }
     }
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
 }
 
@@ -300,30 +220,34 @@ void setup() {
   Serial.begin(115200);
   pinMode(ledPin, OUTPUT);
   pinMode(buzzerPin, OUTPUT);
-  pinMode(ackPin, INPUT_PULLUP);
-  pinMode(testPin, INPUT_PULLUP);
-  Wire.begin(sdaPin, sclPin, 100000);
-  Wire.setTimeOut(15);
+  digitalWrite(ledPin, LOW);
+  digitalWrite(buzzerPin, LOW);
 
   const unsigned long session = static_cast<unsigned long>(esp_random());
-  snprintf(topicRoot, sizeof(topicRoot), "falldetection/ndd/%08lx", session);
+  snprintf(topicRoot, sizeof(topicRoot), "runner/lab3/%08lx", session);
   snprintf(telemetryTopic, sizeof(telemetryTopic), "%s/telemetry", topicRoot);
   snprintf(commandTopic, sizeof(commandTopic), "%s/cmd", topicRoot);
-  snprintf(clientId, sizeof(clientId), "ndd-fall-%08lx", session);
-  Serial.printf("FallDetection | Base topic: %s\n", topicRoot);
+  snprintf(clientId, sizeof(clientId), "runner-%08lx", session);
+  Serial.printf("[BOOT] Base topic: %s\n", topicRoot);
 
-  sampleQueue = xQueueCreate(1, sizeof(Snapshot));
+  dataQueue = xQueueCreate(1, sizeof(Sample));
+  dataAlert = xQueueCreate(1, sizeof(AlertSample));
   commandQueue = xQueueCreate(8, sizeof(Command));
-  if (!sampleQueue || !commandQueue) {
-    Serial.println("ERROR: could not allocate queues");
+  controlQueue = xQueueCreate(1, sizeof(ControlState));
+  if (!dataQueue || !dataAlert || !commandQueue || !controlQueue) {
+    Serial.println("[BOOT] Queue allocation failed");
     return;
   }
-  if (xTaskCreate(sensorTask, "Sensor", 4096, nullptr, 2, nullptr) != pdPASS) {
-    Serial.println("ERROR: could not start sensor task");
+
+  TaskHandle_t alertHandle = nullptr;
+  if (xTaskCreatePinnedToCore(taskAlert, "Alert", 4096, nullptr, 3, &alertHandle, 1) != pdPASS
+      || xTaskCreatePinnedToCore(taskRead, "Read", 4096, nullptr, 2, nullptr, 1) != pdPASS) {
+    if (alertHandle) vTaskDelete(alertHandle);
+    Serial.println("[BOOT] Local tasks could not start");
     return;
   }
-  if (xTaskCreate(networkTask, "Network", 7168, nullptr, 1, nullptr) != pdPASS) {
-    Serial.println("ERROR: could not start network task");
+  if (xTaskCreatePinnedToCore(taskTransmit, "Transmit", 7168, nullptr, 1, nullptr, 0) != pdPASS) {
+    Serial.println("[BOOT] Network task unavailable. Local monitoring active.");
   }
 }
 

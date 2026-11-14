@@ -1,31 +1,23 @@
 {
   "version": 1,
-  "author": "Ngô Bình",
   "editor": "wokwi",
   "parts": [
-    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 25, "left": 14, "attrs": {} },
-    { "type": "wokwi-mpu6050", "id": "imu", "top": -63, "left": 245, "attrs": {} },
-    { "type": "wokwi-led", "id": "led", "top": 38, "left": 257, "attrs": { "color": "red", "label": "ALARM" } },
-    { "type": "wokwi-resistor", "id": "resistor", "top": 103, "left": 179, "attrs": { "value": "220" } },
-    { "type": "wokwi-buzzer", "id": "buzzer", "top": 129, "left": 253, "attrs": { "volume": "0.10" } },
-    { "type": "wokwi-pushbutton", "id": "reset", "top": 170, "left": -131, "attrs": { "color": "blue", "label": "ACK" } },
-    { "type": "wokwi-pushbutton", "id": "test", "top": 240, "left": -131, "attrs": { "color": "yellow", "label": "TEST FALL" } }
+    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 5, "left": 5, "attrs": {} },
+    { "type": "board-bmp180", "id": "bmp", "top": -48, "left": 245, "attrs": { "temperature": "36.5", "pressure": "100600" } },
+    { "type": "wokwi-led", "id": "led", "top": 103, "left": 245, "attrs": { "color": "red" } },
+    { "type": "wokwi-resistor", "id": "resistor", "top": 150, "left": 156, "attrs": { "value": "220" } },
+    { "type": "wokwi-buzzer", "id": "buzzer", "top": 227, "left": 233, "attrs": { "volume": "0.10" } }
   ],
   "connections": [
-    [ "esp:3V3", "imu:VCC", "red", [ "h21", "v-80" ] ],
-    [ "esp:GND.1", "imu:GND", "black", [ "h34", "v-90" ] ],
-    [ "esp:D21", "imu:SDA", "green", [ "h38", "v-97" ] ],
-    [ "esp:D22", "imu:SCL", "blue", [ "h54", "v-105" ] ],
-    [ "imu:AD0", "imu:GND", "black", [ "v14", "h0" ] ],
-    [ "esp:D26", "resistor:1", "orange", [ "h-14", "v90", "h154" ] ],
-    [ "resistor:2", "led:A", "orange", [ "h22", "v-33" ] ],
-    [ "led:C", "esp:GND.1", "black", [ "v17", "h-39" ] ],
-    [ "esp:D27", "buzzer:2", "purple", [ "h-27", "v92", "h183" ] ],
-    [ "buzzer:1", "esp:GND.1", "black", [ "v29", "h-94" ] ],
-    [ "reset:1.r", "esp:D25", "cyan", [ "h31", "v-36" ] ],
-    [ "reset:2.r", "esp:GND.2", "black", [ "h19", "v-14" ] ],
-    [ "test:1.r", "esp:D32", "gold", [ "h41", "v-112" ] ],
-    [ "test:2.r", "esp:GND.2", "black", [ "h12", "v-34" ] ]
+    [ "esp:3V3", "bmp:VCC", "red", [ "h20", "v-145" ] ],
+    [ "esp:GND.1", "bmp:GND", "black", [ "h34", "v-153" ] ],
+    [ "esp:D21", "bmp:SDA", "green", [ "h68", "v-83" ] ],
+    [ "esp:D22", "bmp:SCL", "blue", [ "h79", "v-86" ] ],
+    [ "esp:D26", "resistor:1", "orange", [ "h-20", "v65", "h156" ] ],
+    [ "resistor:2", "led:A", "orange", [ "h19", "v-35" ] ],
+    [ "led:C", "esp:GND.1", "black", [ "v20", "h-103" ] ],
+    [ "esp:D27", "buzzer:2", "purple", [ "h-30", "v145", "h234" ] ],
+    [ "buzzer:1", "esp:GND.2", "black", [ "v22", "h-230" ] ]
   ],
   "dependencies": {}
 }
