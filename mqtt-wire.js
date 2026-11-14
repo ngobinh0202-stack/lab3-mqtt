@@ -33,7 +33,7 @@
       this.stopped = false;
       this.connectAccepted = false;
       this.pingAt = null;
-      const clientId = "fall-" + Math.random().toString(36).slice(2, 14);
+      const clientId = "runner-web-" + Math.random().toString(36).slice(2, 14);
       this.socket = new WebSocket(url, "mqtt");
       this.socket.binaryType = "arraybuffer";
       this.deadline = setTimeout(() => this.stop("timeout"), 9000);
