@@ -1,1 +1,3 @@
+Adafruit BMP085 Library@1.2.4
+Adafruit BusIO
 PubSubClient@2.8
